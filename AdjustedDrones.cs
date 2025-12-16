@@ -179,12 +179,12 @@ public class AdjustedDrones : BaseUnityPlugin
 
         // Only 3 drone tiers: white/green/red.
         // Defaults: higher rarity + combat => lower duration.
-        BindDuration(DroneUptimeRarityTier.White, DroneUptimeTierClass.Utility, 240f);
-        BindDuration(DroneUptimeRarityTier.White, DroneUptimeTierClass.Combat, 180f);
-        BindDuration(DroneUptimeRarityTier.Green, DroneUptimeTierClass.Utility, 180f);
-        BindDuration(DroneUptimeRarityTier.Green, DroneUptimeTierClass.Combat, 135f);
-        BindDuration(DroneUptimeRarityTier.Red, DroneUptimeTierClass.Utility, 120f);
-        BindDuration(DroneUptimeRarityTier.Red, DroneUptimeTierClass.Combat, 90f);
+        BindDuration(DroneUptimeRarityTier.White, DroneUptimeTierClass.Utility, 300f);
+        BindDuration(DroneUptimeRarityTier.White, DroneUptimeTierClass.Combat, 270f);
+        BindDuration(DroneUptimeRarityTier.Green, DroneUptimeTierClass.Utility, 270f);
+        BindDuration(DroneUptimeRarityTier.Green, DroneUptimeTierClass.Combat, 240f);
+        BindDuration(DroneUptimeRarityTier.Red, DroneUptimeTierClass.Utility, 240f);
+        BindDuration(DroneUptimeRarityTier.Red, DroneUptimeTierClass.Combat, 180f);
     }
 
     private void InitializePerDroneConfigs()
