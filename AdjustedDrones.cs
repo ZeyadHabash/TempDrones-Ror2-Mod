@@ -31,6 +31,7 @@ public class AdjustedDrones : BaseUnityPlugin
     internal static AdjustedDrones Instance { get; private set; }
 
     internal static ConfigEntry<bool> ModEnabled;
+    internal static ConfigEntry<bool> DisableWhenOperator;
     internal static ConfigEntry<bool> DisableDroneAggro;
     internal static ConfigEntry<Color> TimerColor;
     internal static ConfigEntry<float> DifficultyExponent;
@@ -42,7 +43,7 @@ public class AdjustedDrones : BaseUnityPlugin
 
     private static readonly HashSet<ConfigEntryBase> riskOfOptionsRegisteredEntries = new();
 
-    private static bool appliedGlobalDroneCostMultipliers;
+    private static readonly Dictionary<PurchaseInteraction, int> originalDroneCosts = new();
 
     private void Awake()
     {
@@ -59,7 +60,8 @@ public class AdjustedDrones : BaseUnityPlugin
             return;
         }
 
-        ApplyGlobalDroneCostMultipliers();
+        // Capture vanilla drone costs early (before we apply any run-gated modifications).
+        CaptureOriginalDroneCostsIfNeeded();
         StartCoroutine(InitializePerDroneConfigsWhenReady());
 
         CharacterBody.onBodyStartGlobal += OnBodyStartGlobal;
@@ -86,6 +88,10 @@ public class AdjustedDrones : BaseUnityPlugin
     {
         // Ensure all DroneDefs are present and configs exist for every drone.
         InitializePerDroneConfigs();
+
+        // Always restore vanilla costs at the start of every run, then optionally apply our multipliers
+        // if the Operator-only condition is satisfied.
+        StartCoroutine(ApplyRunGatedSystems());
     }
 
     private void OnDestroy()
@@ -102,6 +108,13 @@ public class AdjustedDrones : BaseUnityPlugin
             "Enabled",
             true,
             "Enable/disable the AdjustedDrones mod. Requires restart."
+        );
+
+        DisableWhenOperator = Config.Bind(
+            "General",
+            "DisableWhenOperator",
+            false,
+            "If true, this mod is disabled when at least one player is player Operator (I think it messes with his gameplay too much)."
         );
 
         TimerColor = Config.Bind(
@@ -172,14 +185,96 @@ public class AdjustedDrones : BaseUnityPlugin
 
     private void ApplyGlobalDroneCostMultipliers()
     {
-        if (appliedGlobalDroneCostMultipliers)
-        {
-            return;
-        }
-        appliedGlobalDroneCostMultipliers = true;
+        // Backwards-compatible wrapper: apply multipliers (active=true) for the current run.
+        SetGlobalDroneCosts(active: true);
+    }
 
-        // Adjust the prefab costs up-front so the displayed price is correct everywhere.
-        // This avoids per-instance hooks and ensures any future spawns inherit the changed base cost.
+    internal static bool IsModActiveNow()
+    {
+        if (ModEnabled == null || !ModEnabled.Value)
+        {
+            return false;
+        }
+
+        if (DisableWhenOperator != null && DisableWhenOperator.Value && IsOperatorPlayerPresent())
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsOperatorPlayerPresent()
+    {
+        try
+        {
+            var instances = PlayerCharacterMasterController.instances;
+            if (instances == null)
+            {
+                return false;
+            }
+
+            foreach (var pcmc in instances)
+            {
+                if (!pcmc)
+                {
+                    continue;
+                }
+
+                var master = pcmc.master;
+                var body = master ? master.GetBody() : null;
+                if (!body)
+                {
+                    continue;
+                }
+
+                string bodyName = BodyCatalog.GetBodyName(body.bodyIndex);
+                if (string.IsNullOrWhiteSpace(bodyName))
+                {
+                    bodyName = body.name;
+                }
+
+                if (!string.IsNullOrWhiteSpace(bodyName)
+                    && bodyName.IndexOf("Operator", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
+    }
+
+    private System.Collections.IEnumerator ApplyRunGatedSystems()
+    {
+        // Always restore vanilla costs at run start.
+        CaptureOriginalDroneCostsIfNeeded();
+        SetGlobalDroneCosts(active: false);
+
+        // If Operator-gated disabling is enabled, wait briefly for player bodies to exist so we can
+        // reliably detect Operator and keep the mod disabled for that run.
+        if (DisableWhenOperator != null && DisableWhenOperator.Value)
+        {
+            const float timeoutSeconds = 5f;
+            float startTime = Time.unscaledTime;
+            while ((Time.unscaledTime - startTime) < timeoutSeconds && !IsOperatorPlayerPresent())
+            {
+                yield return null;
+            }
+        }
+
+        if (IsModActiveNow())
+        {
+            SetGlobalDroneCosts(active: true);
+        }
+    }
+
+    private static void CaptureOriginalDroneCostsIfNeeded()
+    {
         try
         {
             var cards = Resources.LoadAll<InteractableSpawnCard>("SpawnCards/InteractableSpawnCard");
@@ -187,9 +282,6 @@ public class AdjustedDrones : BaseUnityPlugin
             {
                 return;
             }
-
-            float baseMult = Mathf.Max(0f, DroneBaseCostMultiplier.Value);
-            float repairMult = Mathf.Max(0f, RepairCostMultiplier.Value);
 
             foreach (var card in cards)
             {
@@ -204,14 +296,55 @@ public class AdjustedDrones : BaseUnityPlugin
                     continue;
                 }
 
-                bool isBroken = !string.IsNullOrEmpty(card.name) && card.name.StartsWith("iscBroken", StringComparison.OrdinalIgnoreCase);
-                float mult = isBroken ? repairMult : baseMult;
-                if (Mathf.Approximately(mult, 1f))
+                if (!originalDroneCosts.ContainsKey(purchase))
+                {
+                    originalDroneCosts[purchase] = purchase.cost;
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
+    private static void SetGlobalDroneCosts(bool active)
+    {
+        // Adjust the prefab costs up-front so the displayed price is correct everywhere.
+        // We keep a snapshot of original costs so we can restore when the mod is inactive (e.g. non-Operator runs).
+        try
+        {
+            var cards = Resources.LoadAll<InteractableSpawnCard>("SpawnCards/InteractableSpawnCard");
+            if (cards == null || cards.Length == 0)
+            {
+                return;
+            }
+
+            float baseMult = active ? Mathf.Max(0f, DroneBaseCostMultiplier.Value) : 1f;
+            float repairMult = active ? Mathf.Max(0f, RepairCostMultiplier.Value) : 1f;
+
+            foreach (var card in cards)
+            {
+                if (!card || !card.prefab)
                 {
                     continue;
                 }
 
-                purchase.cost = Mathf.Max(0, Mathf.RoundToInt(purchase.cost * mult));
+                var purchase = card.prefab.GetComponent<PurchaseInteraction>();
+                if (!purchase || !purchase.isDrone)
+                {
+                    continue;
+                }
+
+                if (!originalDroneCosts.TryGetValue(purchase, out int originalCost))
+                {
+                    originalCost = purchase.cost;
+                    originalDroneCosts[purchase] = originalCost;
+                }
+
+                bool isBroken = !string.IsNullOrEmpty(card.name) && card.name.StartsWith("iscBroken", StringComparison.OrdinalIgnoreCase);
+                float mult = isBroken ? repairMult : baseMult;
+                purchase.cost = Mathf.Max(0, Mathf.RoundToInt(originalCost * mult));
             }
         }
         catch (Exception e)
@@ -269,6 +402,7 @@ public class AdjustedDrones : BaseUnityPlugin
         {
             // General
             RegisterRiskOfOptionsCheckbox(ModEnabled);
+            RegisterRiskOfOptionsCheckbox(DisableWhenOperator);
             RegisterRiskOfOptionsColorPicker(TimerColor);
 
             // Aggro
@@ -602,7 +736,7 @@ public class AdjustedDrones : BaseUnityPlugin
     {
         var results = orig(self);
 
-        if (!AdjustedDrones.DisableDroneAggro.Value)
+        if (!IsModActiveNow() || !AdjustedDrones.DisableDroneAggro.Value)
         {
             return results;
         }
@@ -668,6 +802,11 @@ public class AdjustedDrones : BaseUnityPlugin
             return;
         }
 
+        if (!IsModActiveNow())
+        {
+            return;
+        }
+
         if (!self.GetComponent<DroneUptimeAllyCardOverlay>())
         {
             self.gameObject.AddComponent<DroneUptimeAllyCardOverlay>();
@@ -702,6 +841,13 @@ internal static class DroneUptimeDuration
                 ItemTier.Tier3 => DroneUptimeRarityTier.Red,
                 _ => DroneUptimeRarityTier.Green,
             };
+        }
+
+        // Safety: if the mod is inactive (e.g. Operator present), ensure any accidental timer configuration
+        // results in no breaking behavior.
+        if (!AdjustedDrones.IsModActiveNow())
+        {
+            return 0f;
         }
 
         DroneUptimeTierClass tierClass = DroneUptimeTierClass.Utility;
@@ -777,6 +923,11 @@ internal sealed class DroneUptimeTimer : MonoBehaviour
 
     private void Update()
     {
+        if (!AdjustedDrones.IsModActiveNow())
+        {
+            return;
+        }
+
         if (!configured)
         {
             return;
