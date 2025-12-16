@@ -32,6 +32,7 @@ public class AdjustedDrones : BaseUnityPlugin
 
     internal static ConfigEntry<bool> ModEnabled;
     internal static ConfigEntry<bool> DisableWhenOperator;
+    internal static ConfigEntry<string> TimerExemptDrones;
     internal static ConfigEntry<bool> DisableDroneAggro;
     internal static ConfigEntry<Color> TimerColor;
     internal static ConfigEntry<float> DifficultyExponent;
@@ -44,6 +45,9 @@ public class AdjustedDrones : BaseUnityPlugin
     private static readonly HashSet<ConfigEntryBase> riskOfOptionsRegisteredEntries = new();
 
     private static readonly Dictionary<PurchaseInteraction, int> originalDroneCosts = new();
+
+    private static string cachedTimerExemptValue;
+    private static HashSet<string> cachedTimerExemptTokens;
 
     private void Awake()
     {
@@ -115,6 +119,20 @@ public class AdjustedDrones : BaseUnityPlugin
             "DisableWhenOperator",
             false,
             "If true, this mod is disabled when at least one player is Operator/DroneTech (body name contains 'Operator' or 'DroneTech')."
+        );
+
+        TimerExemptDrones = Config.Bind(
+            "General",
+            "TimerExemptDrones",
+            string.Join("\n", new[]
+            {
+                "Drone_11_DroneBomberBodySeconds",
+                "Drone_14_DTGunnerDroneBodySeconds",
+                "Drone_15_DTHaulerDroneBodySeconds",
+                "Drone_16_DTHealingDroneBodySeconds",
+                "Drone_9_DroneCommanderBodySecons",
+            }),
+            "List of drone body names (or per-drone config keys like 'Drone_11_DroneBomberBodySeconds') that should NEVER auto-break from the timer. One entry per line."
         );
 
         TimerColor = Config.Bind(
@@ -404,6 +422,7 @@ public class AdjustedDrones : BaseUnityPlugin
             // General
             RegisterRiskOfOptionsCheckbox(ModEnabled);
             RegisterRiskOfOptionsCheckbox(DisableWhenOperator);
+            RegisterRiskOfOptionsStringInput(TimerExemptDrones);
             RegisterRiskOfOptionsColorPicker(TimerColor);
 
             // Aggro
@@ -494,6 +513,112 @@ public class AdjustedDrones : BaseUnityPlugin
 
         ModSettingsManager.AddOption(new CheckBoxOption(entry));
         riskOfOptionsRegisteredEntries.Add(entry);
+    }
+
+    private static void RegisterRiskOfOptionsStringInput(ConfigEntry<string> entry)
+    {
+        if (entry == null || riskOfOptionsRegisteredEntries.Contains(entry))
+        {
+            return;
+        }
+
+        // RiskOfOptions string input option names vary by version; prefer string-specific, then generic.
+        if (!TryAddRiskOfOptionsOptionByTypeName("RiskOfOptions.Options.StringInputFieldOption", entry)
+            && !TryAddRiskOfOptionsOptionByTypeName("RiskOfOptions.Options.InputFieldOption", entry))
+        {
+            return;
+        }
+
+        riskOfOptionsRegisteredEntries.Add(entry);
+    }
+
+    internal static bool IsDroneExemptFromTimer(DroneDef droneDef)
+    {
+        if (!droneDef)
+        {
+            return false;
+        }
+
+        string raw = TimerExemptDrones?.Value ?? string.Empty;
+        if (!string.Equals(raw, cachedTimerExemptValue, StringComparison.Ordinal))
+        {
+            cachedTimerExemptValue = raw;
+            cachedTimerExemptTokens = ParseTimerExemptTokens(raw);
+        }
+
+        if (cachedTimerExemptTokens == null || cachedTimerExemptTokens.Count == 0)
+        {
+            return false;
+        }
+
+        string bodyName = droneDef.bodyPrefab ? droneDef.bodyPrefab.name : string.Empty;
+        string safeKeyPrefix = GetSafeDroneConfigKeyName(droneDef);
+
+        return cachedTimerExemptTokens.Contains(NormalizeToken(bodyName))
+            || cachedTimerExemptTokens.Contains(NormalizeToken(safeKeyPrefix))
+            || cachedTimerExemptTokens.Contains(NormalizeToken(safeKeyPrefix + "Seconds"));
+    }
+
+    private static HashSet<string> ParseTimerExemptTokens(string raw)
+    {
+        var set = new HashSet<string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return set;
+        }
+
+        var lines = raw.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var line in lines)
+        {
+            string t = NormalizeToken(line);
+            if (t.Length == 0)
+            {
+                continue;
+            }
+
+            // Accept common suffix typos.
+            t = StripSuffix(t, "seconds");
+            t = StripSuffix(t, "secons");
+
+            set.Add(t);
+
+            // If the token looks like our per-drone key, also add just the body name part.
+            // Example: Drone_11_DroneBomberBodySeconds -> dronebomberbody
+            if (t.StartsWith("drone_", StringComparison.Ordinal))
+            {
+                int idxSep = t.IndexOf('_', "drone_".Length);
+                if (idxSep >= 0 && idxSep + 1 < t.Length)
+                {
+                    string remainder = t.Substring(idxSep + 1);
+                    if (remainder.Length > 0)
+                    {
+                        set.Add(remainder);
+                    }
+                }
+            }
+        }
+
+        return set;
+    }
+
+    private static string NormalizeToken(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s))
+        {
+            return string.Empty;
+        }
+
+        // Keep only a simple, case-insensitive token. Underscores are preserved.
+        return s.Trim().ToLowerInvariant();
+    }
+
+    private static string StripSuffix(string s, string suffix)
+    {
+        if (s != null && suffix != null && s.EndsWith(suffix, StringComparison.Ordinal))
+        {
+            return s.Substring(0, s.Length - suffix.Length);
+        }
+        return s;
     }
 
     private static void RegisterRiskOfOptionsColorPicker(ConfigEntry<Color> entry)
@@ -832,6 +957,12 @@ internal static class DroneUptimeDuration
 {
     public static float ComputeBaseDurationSeconds(DroneDef droneDef)
     {
+        // Exemptions override everything: exempt drones never auto-break from the timer.
+        if (AdjustedDrones.IsDroneExemptFromTimer(droneDef))
+        {
+            return 0f;
+        }
+
         DroneUptimeRarityTier tier = DroneUptimeRarityTier.Green;
         if (droneDef)
         {
