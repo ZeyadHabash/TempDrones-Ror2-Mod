@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+
 using System.Linq;
 using System.Reflection;
 using BepInEx;
@@ -30,6 +32,7 @@ public class AdjustedDrones : BaseUnityPlugin
 
     internal static ConfigEntry<bool> ModEnabled;
     internal static ConfigEntry<bool> DisableDroneAggro;
+    internal static ConfigEntry<Color> TimerColor;
     internal static ConfigEntry<float> DifficultyExponent;
     internal static ConfigEntry<float> DifficultyCoefficientMultiplier;
     internal static ConfigEntry<float> RepairCostMultiplier;
@@ -45,6 +48,8 @@ public class AdjustedDrones : BaseUnityPlugin
     {
         Instance = this;
         Log.Init(Logger);
+
+        TryRegisterColorTomlConverter();
         BindConfig();
         RegisterRiskOfOptionsOptions();
 
@@ -97,6 +102,13 @@ public class AdjustedDrones : BaseUnityPlugin
             "Enabled",
             true,
             "Enable/disable the AdjustedDrones mod. Requires restart."
+        );
+
+        TimerColor = Config.Bind(
+            "General",
+            "TimerColor",
+            new Color(0.3f, 0.6f, 1f, 1f),
+            "Drone timer UI color."
         );
 
         DisableDroneAggro = Config.Bind(
@@ -257,6 +269,7 @@ public class AdjustedDrones : BaseUnityPlugin
         {
             // General
             RegisterRiskOfOptionsCheckbox(ModEnabled);
+            RegisterRiskOfOptionsColorPicker(TimerColor);
 
             // Aggro
             RegisterRiskOfOptionsCheckbox(DisableDroneAggro);
@@ -346,6 +359,160 @@ public class AdjustedDrones : BaseUnityPlugin
 
         ModSettingsManager.AddOption(new CheckBoxOption(entry));
         riskOfOptionsRegisteredEntries.Add(entry);
+    }
+
+    private static void RegisterRiskOfOptionsColorPicker(ConfigEntry<Color> entry)
+    {
+        if (entry == null || riskOfOptionsRegisteredEntries.Contains(entry))
+        {
+            return;
+        }
+
+        // RiskOfOptions has a color picker option, but its exact type name can vary across versions.
+        // Try common names first, then fall back to scanning for an option type that can take this ConfigEntry.
+        if (!TryAddRiskOfOptionsOptionByTypeName("RiskOfOptions.Options.ColorOption", entry)
+            && !TryAddRiskOfOptionsOptionByTypeName("RiskOfOptions.Options.ColorPickerOption", entry)
+            && !TryAddRiskOfOptionsOptionByHeuristic(entry))
+        {
+            return;
+        }
+
+        riskOfOptionsRegisteredEntries.Add(entry);
+    }
+
+    private static bool TryAddRiskOfOptionsOptionByHeuristic(object entry)
+    {
+        try
+        {
+            var asm = typeof(ModSettingsManager).Assembly;
+            var entryType = entry.GetType();
+            var options = asm.GetTypes()
+                .Where(t => t != null
+                    && string.Equals(t.Namespace, "RiskOfOptions.Options", StringComparison.Ordinal)
+                    && t.Name.IndexOf("Color", StringComparison.OrdinalIgnoreCase) >= 0)
+                .ToArray();
+
+            foreach (var optionType in options)
+            {
+                var ctor = optionType
+                    .GetConstructors(BindingFlags.Public | BindingFlags.Instance)
+                    .FirstOrDefault(c =>
+                    {
+                        var ps = c.GetParameters();
+                        return ps.Length == 1 && ps[0].ParameterType.IsAssignableFrom(entryType);
+                    });
+
+                if (ctor == null)
+                {
+                    continue;
+                }
+
+                object optionInstance = ctor.Invoke(new[] { entry });
+                if (optionInstance == null)
+                {
+                    continue;
+                }
+
+                var addOption = typeof(ModSettingsManager)
+                    .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                    .FirstOrDefault(m => m.Name == "AddOption" && m.GetParameters().Length == 1);
+
+                if (addOption == null)
+                {
+                    return false;
+                }
+
+                addOption.Invoke(null, new[] { optionInstance });
+                return true;
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
+    }
+
+    private static void TryRegisterColorTomlConverter()
+    {
+        try
+        {
+            // Avoid hard dependency on a specific TomlTypeConverter API shape.
+            var converterType = typeof(BepInEx.Configuration.TomlTypeConverter);
+            var addConverter = converterType
+                .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .FirstOrDefault(m => m.Name == "AddConverter" && m.GetParameters().Length == 2);
+
+            if (addConverter == null)
+            {
+                return;
+            }
+
+            addConverter.Invoke(null, new object[] { typeof(Color), new UnityColorTypeConverter() });
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
+    private sealed class UnityColorTypeConverter : System.ComponentModel.TypeConverter
+    {
+        public override bool CanConvertFrom(ITypeDescriptorContext context, Type sourceType)
+        {
+            return sourceType == typeof(string) || base.CanConvertFrom(context, sourceType);
+        }
+
+        public override bool CanConvertTo(ITypeDescriptorContext context, Type destinationType)
+        {
+            return destinationType == typeof(string) || base.CanConvertTo(context, destinationType);
+        }
+
+        public override object ConvertFrom(ITypeDescriptorContext context, System.Globalization.CultureInfo culture, object value)
+        {
+            if (value is string s)
+            {
+                s = s.Trim();
+                if (s.Length == 0)
+                {
+                    return Color.white;
+                }
+
+                // Accept HTML colors (#RRGGBB / #RRGGBBAA) and comma-separated floats (r,g,b[,a]).
+                string html = s.StartsWith("#", StringComparison.Ordinal) ? s : ("#" + s);
+                if (ColorUtility.TryParseHtmlString(html, out var parsed))
+                {
+                    return parsed;
+                }
+
+                var parts = s.Split(',');
+                if (parts.Length is 3 or 4
+                    && float.TryParse(parts[0], out float r)
+                    && float.TryParse(parts[1], out float g)
+                    && float.TryParse(parts[2], out float b))
+                {
+                    float a = 1f;
+                    if (parts.Length == 4)
+                    {
+                        float.TryParse(parts[3], out a);
+                    }
+                    return new Color(r, g, b, a);
+                }
+            }
+
+            return base.ConvertFrom(context, culture, value);
+        }
+
+        public override object ConvertTo(ITypeDescriptorContext context, System.Globalization.CultureInfo culture, object value, Type destinationType)
+        {
+            if (destinationType == typeof(string) && value is Color c)
+            {
+                return "#" + ColorUtility.ToHtmlStringRGBA(c);
+            }
+
+            return base.ConvertTo(context, culture, value, destinationType);
+        }
     }
 
     private static string GetDroneDisplayNameForConfig(DroneDef droneDef)
@@ -646,11 +813,9 @@ internal sealed class DroneUptimeTimer : MonoBehaviour
         bool isMegaDrone = IsMegaDrone(body, def);
         if (isMegaDrone)
         {
-            // Let the MegaDroneDeathState hook spawn the broken repairable (if enabled).
-            if (body.master)
-            {
-                body.master.TrueKill();
-            }
+            // Spawn the broken repairable directly. Relying on death-state behavior is brittle
+            // (e.g. TrueKill can bypass the vanilla broken spawn path for some drones).
+            DroneUptimeRepairSpawner.SpawnBrokenAndRemove(body, def);
         }
         else
         {
@@ -697,6 +862,7 @@ internal sealed class DroneUptimeAllyCardOverlay : MonoBehaviour
 
     private static bool triedLoadTempItemIndicator;
     private static GameObject cachedTempItemIndicatorPrefab;
+
 
     private void Awake()
     {
@@ -766,6 +932,8 @@ internal sealed class DroneUptimeAllyCardOverlay : MonoBehaviour
                     break;
                 }
             }
+
+            ApplyTimerColorIfConfigured();
         }
 
         // Fallback: if temp item indicator failed, use text timer
@@ -783,10 +951,33 @@ internal sealed class DroneUptimeAllyCardOverlay : MonoBehaviour
 
             fallbackText = textObj.AddComponent<TMPro.TextMeshProUGUI>();
             fallbackText.fontSize = 12f;
-            fallbackText.color = new Color(0.3f, 0.6f, 1f, 1f); // Blue color
+            fallbackText.color = new Color(0.3f, 0.6f, 1f, 1f);
             fallbackText.alignment = TMPro.TextAlignmentOptions.Center;
             fallbackText.enableWordWrapping = false;
             fallbackText.raycastTarget = false;
+
+            ApplyTimerColorIfConfigured();
+        }
+    }
+
+    private void ApplyTimerColorIfConfigured()
+    {
+        var entry = AdjustedDrones.TimerColor;
+        if (entry == null)
+        {
+            return;
+        }
+
+        Color c = entry.Value;
+
+        if (timerImage)
+        {
+            timerImage.color = c;
+        }
+
+        if (fallbackText)
+        {
+            fallbackText.color = c;
         }
     }
 
@@ -796,6 +987,9 @@ internal sealed class DroneUptimeAllyCardOverlay : MonoBehaviour
         {
             TryBuildUi();
         }
+
+        // Keep color in sync in case config changes at runtime.
+        ApplyTimerColorIfConfigured();
 
         if (!allyCard)
         {
