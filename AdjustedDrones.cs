@@ -11,6 +11,7 @@ using EntityStates.Drone;
 using UnityEngine;
 using UnityEngine.UI;
 using RiskOfOptions;
+using RiskOfOptions.Options;
 
 namespace AdjustedDrones;
 
@@ -36,14 +37,16 @@ public class AdjustedDrones : BaseUnityPlugin
     internal static readonly Dictionary<(DroneUptimeRarityTier tier, DroneUptimeTierClass tierClass), ConfigEntry<float>> DurationSeconds = new();
     internal static readonly Dictionary<DroneIndex, ConfigEntry<float>> PerDroneDurationSeconds = new();
 
+    private static readonly HashSet<ConfigEntryBase> riskOfOptionsRegisteredEntries = new();
+
     private static bool appliedGlobalDroneCostMultipliers;
-    private static readonly HashSet<ConfigEntryBase> riskOfOptionsRegistered = new();
 
     private void Awake()
     {
         Instance = this;
         Log.Init(Logger);
         BindConfig();
+        RegisterRiskOfOptionsOptions();
 
         if (!ModEnabled.Value)
         {
@@ -52,7 +55,6 @@ public class AdjustedDrones : BaseUnityPlugin
         }
 
         ApplyGlobalDroneCostMultipliers();
-        TryRegisterRiskOfOptions();
         StartCoroutine(InitializePerDroneConfigsWhenReady());
 
         CharacterBody.onBodyStartGlobal += OnBodyStartGlobal;
@@ -73,14 +75,12 @@ public class AdjustedDrones : BaseUnityPlugin
         }
 
         InitializePerDroneConfigs();
-        TryRegisterRiskOfOptions();
     }
 
     private void Run_onRunStartGlobal(Run run)
     {
         // Ensure all DroneDefs are present and configs exist for every drone.
         InitializePerDroneConfigs();
-        TryRegisterRiskOfOptions();
     }
 
     private void OnDestroy()
@@ -90,166 +90,6 @@ public class AdjustedDrones : BaseUnityPlugin
         On.RoR2.UI.AllyCardController.Awake -= AllyCardController_Awake;
         Run.onRunStartGlobal -= Run_onRunStartGlobal;
     }
-
-    private void TryRegisterRiskOfOptions()
-    {
-        // RiskOfOptions does NOT automatically show BepInEx configs; options must be registered.
-        // We use reflection so the mod still compiles/runs without RiskOfOptions installed.
-        try
-        {
-            var riskOfOptionsAssembly = AppDomain.CurrentDomain.GetAssemblies()
-                .FirstOrDefault(a => string.Equals(a.GetName().Name, "RiskOfOptions", StringComparison.OrdinalIgnoreCase));
-            if (riskOfOptionsAssembly == null)
-            {
-                return;
-            }
-
-            Type managerType = riskOfOptionsAssembly.GetType("RiskOfOptions.ModSettingsManager", throwOnError: false);
-            if (managerType == null)
-            {
-                return;
-            }
-
-            MethodInfo addOptionMethod = managerType.GetMethods(BindingFlags.Public | BindingFlags.Static)
-                .FirstOrDefault(m => m.Name == "AddOption" && m.GetParameters().Length == 1);
-            if (addOptionMethod == null)
-            {
-                return;
-            }
-
-            // Core options.
-            RegisterRiskOfOptionsEntry(riskOfOptionsAssembly, addOptionMethod, ModEnabled);
-            RegisterRiskOfOptionsEntry(riskOfOptionsAssembly, addOptionMethod, DisableDroneAggro);
-            RegisterRiskOfOptionsEntry(riskOfOptionsAssembly, addOptionMethod, DifficultyExponent);
-            RegisterRiskOfOptionsEntry(riskOfOptionsAssembly, addOptionMethod, DifficultyCoefficientMultiplier);
-            RegisterRiskOfOptionsEntry(riskOfOptionsAssembly, addOptionMethod, RepairCostMultiplier);
-            RegisterRiskOfOptionsEntry(riskOfOptionsAssembly, addOptionMethod, DroneBaseCostMultiplier);
-
-            // Tier/class durations.
-            foreach (var kvp in DurationSeconds)
-            {
-                RegisterRiskOfOptionsEntry(riskOfOptionsAssembly, addOptionMethod, kvp.Value);
-            }
-
-            // Per-drone overrides.
-            foreach (var kvp in PerDroneDurationSeconds)
-            {
-                RegisterRiskOfOptionsEntry(riskOfOptionsAssembly, addOptionMethod, kvp.Value);
-            }
-        }
-        catch (Exception e)
-        {
-            Log.Error(e);
-        }
-    }
-
-    private static void RegisterRiskOfOptionsEntry(Assembly riskOfOptionsAssembly, MethodInfo addOptionMethod, ConfigEntryBase entry)
-    {
-        if (entry == null)
-        {
-            return;
-        }
-
-        if (!riskOfOptionsRegistered.Add(entry))
-        {
-            return;
-        }
-
-        Type entryValueType = entry.SettingType;
-        string[] candidateOptionTypeNames;
-
-        if (entryValueType == typeof(bool))
-        {
-            candidateOptionTypeNames = new[] { "RiskOfOptions.Options.CheckBoxOption" };
-        }
-        else if (entryValueType == typeof(float))
-        {
-            // Prefer input-field style options if present (supports -1 and 0).
-            candidateOptionTypeNames = new[]
-            {
-                "RiskOfOptions.Options.FloatInputFieldOption",
-                "RiskOfOptions.Options.FloatFieldOption",
-                "RiskOfOptions.Options.StepSliderOption",
-                "RiskOfOptions.Options.FloatSliderOption",
-                "RiskOfOptions.Options.SliderOption",
-            };
-        }
-        else if (entryValueType == typeof(int))
-        {
-            candidateOptionTypeNames = new[]
-            {
-                "RiskOfOptions.Options.IntInputFieldOption",
-                "RiskOfOptions.Options.IntFieldOption",
-                "RiskOfOptions.Options.IntSliderOption",
-            };
-        }
-        else
-        {
-            return;
-        }
-
-        foreach (string typeName in candidateOptionTypeNames)
-        {
-            Type optionType = riskOfOptionsAssembly.GetType(typeName, throwOnError: false);
-            if (optionType == null)
-            {
-                continue;
-            }
-
-            object optionInstance = TryCreateRiskOfOptionsOptionInstance(optionType, entry);
-            if (optionInstance == null)
-            {
-                continue;
-            }
-
-            addOptionMethod.Invoke(null, new[] { optionInstance });
-            return;
-        }
-    }
-
-    private static object TryCreateRiskOfOptionsOptionInstance(Type optionType, ConfigEntryBase entry)
-    {
-        foreach (var ctor in optionType.GetConstructors(BindingFlags.Public | BindingFlags.Instance))
-        {
-            var parameters = ctor.GetParameters();
-            if (parameters.Length == 1)
-            {
-                if (parameters[0].ParameterType.IsAssignableFrom(entry.GetType()) || parameters[0].ParameterType == typeof(ConfigEntryBase))
-                {
-                    return ctor.Invoke(new object[] { entry });
-                }
-            }
-            else if (parameters.Length == 2)
-            {
-                if (!(parameters[0].ParameterType.IsAssignableFrom(entry.GetType()) || parameters[0].ParameterType == typeof(ConfigEntryBase)))
-                {
-                    continue;
-                }
-
-                object configObj = null;
-                try
-                {
-                    configObj = Activator.CreateInstance(parameters[1].ParameterType);
-                }
-                catch
-                {
-                    configObj = null;
-                }
-
-                try
-                {
-                    return ctor.Invoke(new object[] { entry, configObj });
-                }
-                catch
-                {
-                    // try next
-                }
-            }
-        }
-
-        return null;
-    }
-
     private void BindConfig()
     {
         ModEnabled = Config.Bind(
@@ -374,9 +214,13 @@ public class AdjustedDrones : BaseUnityPlugin
             $"Duration.{tier}",
             $"{tierClass}Seconds",
             defaultSeconds,
-            "Base active duration in seconds before the drone/turret breaks and requires repair. Set to 0 for infinite duration (no timer UI)."
+            new ConfigDescription(
+                "Base active duration in seconds before the drone/turret breaks and requires repair. Set to 0 for infinite duration (no timer UI)."
+            )
         );
         DurationSeconds[(tier, tierClass)] = entry;
+
+        RegisterRiskOfOptionsUnlimitedFloat(entry);
     }
 
     internal ConfigEntry<float> EnsurePerDroneEntry(DroneDef droneDef)
@@ -397,10 +241,111 @@ public class AdjustedDrones : BaseUnityPlugin
             "Overrides.PerDrone",
             safeName + "Seconds",
             -1f,
-            $"Per-drone duration override for '{displayName}' in seconds. Set to -1 to use the tier/class duration. Set to 0 for infinite duration (no timer UI)."
+            new ConfigDescription(
+                $"Per-drone duration override for '{displayName}' in seconds. Set to -1 to use the tier/class duration. Set to 0 for infinite duration (no timer UI)."
+            )
         );
         PerDroneDurationSeconds[idx] = entry;
+
+        RegisterRiskOfOptionsUnlimitedFloat(entry);
         return entry;
+    }
+
+    private void RegisterRiskOfOptionsOptions()
+    {
+        try
+        {
+            // General
+            RegisterRiskOfOptionsCheckbox(ModEnabled);
+
+            // Aggro
+            RegisterRiskOfOptionsCheckbox(DisableDroneAggro);
+
+            // Scaling
+            RegisterRiskOfOptionsUnlimitedFloat(DifficultyExponent);
+            RegisterRiskOfOptionsUnlimitedFloat(DifficultyCoefficientMultiplier);
+
+            // Repair / cost
+            RegisterRiskOfOptionsUnlimitedFloat(RepairCostMultiplier);
+            RegisterRiskOfOptionsUnlimitedFloat(DroneBaseCostMultiplier);
+
+            // Duration tier/class sliders are registered in BindDuration().
+            // Per-drone override sliders are registered in EnsurePerDroneEntry().
+
+            ModSettingsManager.SetModDescription("Adjust drone uptime/duration scaling and drone costs. Includes per-drone overrides.");
+        }
+        catch (Exception e)
+        {
+            // If RiskOfOptions isn't present/misconfigured, don't hard-fail the mod.
+            Log.Error(e);
+        }
+    }
+
+    private static void RegisterRiskOfOptionsUnlimitedFloat(ConfigEntry<float> entry)
+    {
+        if (entry == null || riskOfOptionsRegisteredEntries.Contains(entry))
+        {
+            return;
+        }
+
+        // Avoid max-limited sliders for values that should be unbounded.
+        // Prefer the numeric field option (name varies by RiskOfOptions version) via reflection.
+        if (!TryAddRiskOfOptionsOptionByTypeName("RiskOfOptions.Options.FloatFieldOption", entry)
+            && !TryAddRiskOfOptionsOptionByTypeName("RiskOfOptions.Options.FloatInputFieldOption", entry)
+            && !TryAddRiskOfOptionsOptionByTypeName("RiskOfOptions.Options.InputFieldOption", entry))
+        {
+            Log.Warning($"RiskOfOptions float field option not found; skipping menu option for '{entry.Definition.Section}.{entry.Definition.Key}' to avoid imposing an upper limit.");
+            return;
+        }
+
+        riskOfOptionsRegisteredEntries.Add(entry);
+    }
+
+    private static bool TryAddRiskOfOptionsOptionByTypeName(string fullTypeName, object ctorArg)
+    {
+        try
+        {
+            var asm = typeof(ModSettingsManager).Assembly;
+            var optionType = asm.GetType(fullTypeName, throwOnError: false);
+            if (optionType == null)
+            {
+                return false;
+            }
+
+            object optionInstance = Activator.CreateInstance(optionType, ctorArg);
+            if (optionInstance == null)
+            {
+                return false;
+            }
+
+            // Call ModSettingsManager.AddOption(optionInstance) via reflection to avoid hard dependency on the option base type.
+            var addOption = typeof(ModSettingsManager)
+                .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .FirstOrDefault(m => m.Name == "AddOption" && m.GetParameters().Length == 1);
+
+            if (addOption == null)
+            {
+                return false;
+            }
+
+            addOption.Invoke(null, new[] { optionInstance });
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void RegisterRiskOfOptionsCheckbox(ConfigEntry<bool> entry)
+    {
+        if (entry == null || riskOfOptionsRegisteredEntries.Contains(entry))
+        {
+            return;
+        }
+
+        ModSettingsManager.AddOption(new CheckBoxOption(entry));
+        riskOfOptionsRegisteredEntries.Add(entry);
     }
 
     private static string GetDroneDisplayNameForConfig(DroneDef droneDef)
