@@ -1,0 +1,34 @@
+# Binaries and executables
+*.dll
+*.exe
+*.pdb
+*.cache
+*.log
+*.tmp
+*.temp
+
+# Build outputs (common for .NET projects)
+bin/
+obj/
+
+# NuGet packages (if using NuGet for dependencies)
+packages/
+
+# Visual Studio / .NET IDE files
+*.user
+*.suo
+*.vs/
+*.vscode/  # Uncomment if you want to ignore VS Code settings; otherwise, keep for shared config
+
+# BepInEx / Mod-specific (logs and configs that shouldn't be committed)
+BepInEx/config/
+BepInEx/plugins/  # If you have built plugins here, but keep source
+*.log
+
+# Temporary files
+Thumbs.db
+.DS_Store
+
+# OS-specific
+*.swp
+*.bak
