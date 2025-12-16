@@ -114,7 +114,7 @@ public class AdjustedDrones : BaseUnityPlugin
             "General",
             "DisableWhenOperator",
             false,
-            "If true, this mod is disabled when at least one player is player Operator (I think it messes with his gameplay too much)."
+            "If true, this mod is disabled when at least one player is Operator/DroneTech (body name contains 'Operator' or 'DroneTech')."
         );
 
         TimerColor = Config.Bind(
@@ -235,7 +235,8 @@ public class AdjustedDrones : BaseUnityPlugin
                 }
 
                 if (!string.IsNullOrWhiteSpace(bodyName)
-                    && bodyName.IndexOf("Operator", StringComparison.OrdinalIgnoreCase) >= 0)
+                    && (bodyName.IndexOf("Operator", StringComparison.OrdinalIgnoreCase) >= 0
+                        || bodyName.IndexOf("DroneTech", StringComparison.OrdinalIgnoreCase) >= 0))
                 {
                     return true;
                 }
