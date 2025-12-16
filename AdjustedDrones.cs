@@ -46,6 +46,8 @@ public class AdjustedDrones : BaseUnityPlugin
 
     private static readonly Dictionary<PurchaseInteraction, int> originalDroneCosts = new();
 
+    private static readonly Dictionary<DroneVendorMultiShopController, (int tier1, int tier2, int tier3)> originalDroneVendorTierCosts = new();
+
     private static string cachedTimerExemptValue;
     private static HashSet<string> cachedTimerExemptTokens;
 
@@ -71,6 +73,7 @@ public class AdjustedDrones : BaseUnityPlugin
         CharacterBody.onBodyStartGlobal += OnBodyStartGlobal;
         On.RoR2.BullseyeSearch.GetResults += BullseyeSearch_GetResults;
         On.RoR2.UI.AllyCardController.Awake += AllyCardController_Awake;
+        On.RoR2.DroneVendorMultiShopController.Start += DroneVendorMultiShopController_Start;
         Run.onRunStartGlobal += Run_onRunStartGlobal;
     }
 
@@ -103,7 +106,31 @@ public class AdjustedDrones : BaseUnityPlugin
         CharacterBody.onBodyStartGlobal -= OnBodyStartGlobal;
         On.RoR2.BullseyeSearch.GetResults -= BullseyeSearch_GetResults;
         On.RoR2.UI.AllyCardController.Awake -= AllyCardController_Awake;
+        On.RoR2.DroneVendorMultiShopController.Start -= DroneVendorMultiShopController_Start;
         Run.onRunStartGlobal -= Run_onRunStartGlobal;
+    }
+
+    private void DroneVendorMultiShopController_Start(On.RoR2.DroneVendorMultiShopController.orig_Start orig, DroneVendorMultiShopController self)
+    {
+        if (!self)
+        {
+            orig(self);
+            return;
+        }
+
+        CacheOriginalDroneVendorTierCostsIfNeeded(self);
+
+        bool active = IsModActiveNow();
+        float mult = active ? Mathf.Max(0f, DroneBaseCostMultiplier.Value) : 1f;
+
+        if (originalDroneVendorTierCosts.TryGetValue(self, out var original))
+        {
+            self.baseCostTier1 = Mathf.Max(0, Mathf.RoundToInt(original.tier1 * mult));
+            self.baseCostTier2 = Mathf.Max(0, Mathf.RoundToInt(original.tier2 * mult));
+            self.baseCostTier3 = Mathf.Max(0, Mathf.RoundToInt(original.tier3 * mult));
+        }
+
+        orig(self);
     }
     private void BindConfig()
     {
@@ -274,28 +301,77 @@ public class AdjustedDrones : BaseUnityPlugin
         CaptureOriginalDroneCostsIfNeeded();
         SetGlobalDroneCosts(active: false);
 
-        // If Operator-gated disabling is enabled, wait briefly for player bodies to exist so we can
-        // reliably detect Operator and keep the mod disabled for that run.
+        // If Operator-gated disabling is enabled, wait briefly for ANY player body to exist.
+        // (Waiting for "operator present" is wrong: on non-Operator runs we'd delay cost changes long enough
+        // that interactables can already be spawned with vanilla prices.)
         if (DisableWhenOperator != null && DisableWhenOperator.Value)
         {
             const float timeoutSeconds = 5f;
             float startTime = Time.unscaledTime;
-            while ((Time.unscaledTime - startTime) < timeoutSeconds && !IsOperatorPlayerPresent())
+            while ((Time.unscaledTime - startTime) < timeoutSeconds && !AreAnyPlayerBodiesPresent())
             {
                 yield return null;
             }
         }
 
-        if (IsModActiveNow())
+        SetGlobalDroneCosts(active: IsModActiveNow());
+    }
+
+    private static bool AreAnyPlayerBodiesPresent()
+    {
+        try
         {
-            SetGlobalDroneCosts(active: true);
+            var instances = PlayerCharacterMasterController.instances;
+            if (instances == null)
+            {
+                return false;
+            }
+
+            foreach (var pcmc in instances)
+            {
+                if (!pcmc)
+                {
+                    continue;
+                }
+
+                var master = pcmc.master;
+                var body = master ? master.GetBody() : null;
+                if (body)
+                {
+                    return true;
+                }
+            }
         }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
     }
 
     private static void CaptureOriginalDroneCostsIfNeeded()
     {
         try
         {
+            // Drone terminals (DroneVendorMultiShopController) do not use PurchaseInteraction.cost as the source of truth.
+            // They derive cost from baseCostTier* and write PurchaseInteraction.Networkcost at runtime.
+            try
+            {
+                var vendors = Resources.FindObjectsOfTypeAll<DroneVendorMultiShopController>();
+                if (vendors != null)
+                {
+                    foreach (var vendor in vendors)
+                    {
+                        CacheOriginalDroneVendorTierCostsIfNeeded(vendor);
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
             var cards = Resources.LoadAll<InteractableSpawnCard>("SpawnCards/InteractableSpawnCard");
             if (cards == null || cards.Length == 0)
             {
@@ -324,6 +400,19 @@ public class AdjustedDrones : BaseUnityPlugin
         catch
         {
             // ignore
+        }
+    }
+
+    private static void CacheOriginalDroneVendorTierCostsIfNeeded(DroneVendorMultiShopController vendor)
+    {
+        if (!vendor)
+        {
+            return;
+        }
+
+        if (!originalDroneVendorTierCosts.ContainsKey(vendor))
+        {
+            originalDroneVendorTierCosts[vendor] = (vendor.baseCostTier1, vendor.baseCostTier2, vendor.baseCostTier3);
         }
     }
 
